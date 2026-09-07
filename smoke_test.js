@@ -4962,6 +4962,31 @@ console.log('gfm status:', els_stubs.stat.textContent);
     pfRefused&&okOnePhase&&okP&&okLat);
   }
  }
+
+ // lv_04kv_rooftop_pv: nine inverters are quiet before the remote phase-A
+ // inverter closes at 3 s. Its aggressive PI tuning must produce a growing
+ // phase-A RMS envelope while phases B and C remain steady. The two windows
+ // guard the intended instability mechanism rather than a single voltage peak.
+ {
+  const s=loadEx('lv_04kv_rooftop_pv');
+  const r=simulate(s.nph,s.Tms,null,s.dtUs,s.plotUs);
+  if(r.err){console.log('lv_04kv_rooftop_pv error:',r.err);record('example:lv_04kv_rooftop_pv','remote inverter connection excites a phase-A control instability',false);}
+  else{
+   const spread=(ph,lo,hi)=>{
+    const a=[]; for(let t=lo;t<=hi;t+=20)a.push(rmsCyc(r,vOf(r,105,ph),1,t));
+    return Math.max(...a)-Math.min(...a);
+   };
+   const pre=spread(0,2400,2900), lateA=spread(0,4400,4980);
+   const lateB=spread(1,4400,4980), lateC=spread(2,4400,4980);
+   // With 1 ms plot decimation a nominal 20 ms RMS window has only 20 samples,
+   // so its phase-dependent numerical spread is several volts. Keep the guard
+   // well below the 176 V unstable envelope while allowing that display-grid
+   // quantization.
+   const ok=pre<10&&lateA>100&&lateA>10*Math.max(lateB,lateC);
+   console.log('lv_04kv_rooftop_pv: phase-A RMS spread before/after connection',pre.toFixed(2),'/',lateA.toFixed(1),'V; phase B/C late',lateB.toFixed(2),'/',lateC.toFixed(2),'V',ok?'PASS':'FAIL');
+   record('example:lv_04kv_rooftop_pv','remote inverter connection excites a phase-A control instability',ok);
+  }
+ }
  S.vconv='ph'; // global, leaks into anything that runs after this (CLAUDE.md)
 }
 

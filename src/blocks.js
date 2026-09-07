@@ -160,6 +160,10 @@ const DEFS = {
       E0: { v: 277, l: 'E0 (V rms)' }, f0: { v: 60, l: 'f0 (Hz)' },
       mp: { v: 0.05, l: 'P droop/gain (Hz/kW)' }, mq: { v: 0.5, l: 'Q droop/gain (V/kvar)' },
       P0: { v: 0, l: 'P set (kW)' }, Q0: { v: 0, l: 'Q set (kvar)' },
+      tSet: { v: -1, l: 'setpoint step (ms, -1=off)' },
+      P1: { v: 0, l: 'P after step (kW)' }, Q1: { v: 0, l: 'Q after step (kvar)' },
+      tConn: { v: -1, l: 'connect at (ms, -1=connected)' },
+      Tramp: { v: 100, l: 'connect ramp (ms)' },
       kiP: { v: 0.05, l: 'GFL ki P (Hz/kW/s)' }, kiQ: { v: 2, l: 'GFL ki Q (V/kvar/s)' },
       Rf: { v: 0.1, l: 'Rf (Ω)' }, Lf: { v: 1, l: 'Lf (mH)' }, Tf: { v: 20, l: 'meas filter (ms)' },
       Idcmax: { v: 100, l: 'I dc max (A)' },
@@ -1221,6 +1225,7 @@ function makeConverters(topo, dt) {
     // A lateral is phase-to-neutral, so its E0 is a phase value already.
     const E0ph = vPh(p.E0, lat ? 1 : 3);
     const P0e = pi ? pi.P / 1000 : p.P0, E0e = pi ? pi.E : E0ph, Q0e = pi ? pi.Q / 1000 : p.Q0;
+    const connectAt = p.tConn != null && +p.tConn >= 0 ? +p.tConn * 1e-3 : -1;
     arr.push({
       b, kind: 'gfm',
       th: pi ? pi.th : 0, E: pi ? pi.E : E0ph, Pf: pi ? pi.P : 0, Qf: pi ? pi.Q : 0, integP: 0, integQ: 0, idc: 0,
@@ -1231,6 +1236,7 @@ function makeConverters(topo, dt) {
       // no-load point v ≈ e so startup sees tgt = 1, not a phantom fault),
       // and the actively-limited flag the GFL anti-windup keys on.
       mu: 1, Bf: nP * E0e * E0e, Cf: nP * E0e * E0e, lim: false,
+      connected: connectAt < 0,
       nEff: nP, // solver.js sizes this element's recorded traces from here
       x: new Array(nP).fill(0), i: new Array(nP).fill(0), cur: 0, // x = prev EMF-to-terminal branch voltage
       // 1-ph measurement state (unused when nP === 3): one-cycle projections
@@ -1239,6 +1245,7 @@ function makeConverters(topo, dt) {
       bIs: new Float64Array(NW), bIc: new Float64Array(NW),
       sVs: 0, sVc: 0, sIs: 0, sIc: 0, wIdx: 0, wCnt: 0,
       stamp(M) {
+        if (!this.connected) return;
         for (let k = 0; k < nP; k++) {
           if (a1[k] >= 0) M[a1[k]][a1[k]] += G;
           if (a2[k] >= 0) M[a2[k]][a2[k]] += G;
@@ -1255,6 +1262,7 @@ function makeConverters(topo, dt) {
       // before this can run with nP === 1 — but the loop is written generic
       // over nP/pl anyway rather than assuming 3-phase.
       seed(c) {
+        if (!this.connected) return true;
         if (!pi) return false;
         const Y = c.yRL(p.Rf, Lf), xs = [], is = [];
         for (let k = 0; k < nP; k++) {
@@ -1275,7 +1283,16 @@ function makeConverters(topo, dt) {
       // here since solvePowerFlow() refuses tap circuits.
       e(k) { return this.sgn * this.E * this.mu * Math.SQRT2 * Math.sin(this.th + SHIFT[pl[k]]); }, // mu = current-limiter backoff (SPEC §2)
       ihf(k, be) { return (be ? this.i[k] * kL : this.x[k] - this.i[k] * k2) * G; },
+      segCheck(t) {
+        if (!this.connected && connectAt >= 0 && t >= connectAt) {
+          this.connected = true;
+          this.x.fill(0); this.i.fill(0); this.cur = 0;
+          return true;
+        }
+        return false;
+      },
       inject(I, be) {
+        if (!this.connected) return;
         for (let k = 0; k < nP; k++) {
           const inj = G * this.e(k) + this.ihf(k, be);
           if (a1[k] >= 0) I[a1[k]] += inj;
@@ -1283,13 +1300,21 @@ function makeConverters(topo, dt) {
         }
         if (dc >= 0) I[dc] -= this.idc; // one-step lag, same pattern as pfc/batt
       },
-      update(V, be) {
+      update(V, be, t) {
         const h = be ? dt / 2 : dt;
         const nv = n => (n < 0 ? 0 : V[n]);
         const idx = []; for (let k = 0; k < nP; k++) idx.push(k);
         const vb = idx.map(k => nv(a1[k]) - nv(a2[k]));
         this._vb = vb; // branch voltage exposed for P/Q (SPEC §3), distinct from x (EMF-referenced)
         this._vt = idx.map(k => nv(a1[k])); // terminal-0 node voltage, for through-power
+        if (!this.connected) {
+          this.x.fill(0); this.i.fill(0); this.cur = 0; this.idc = 0;
+          this.Pf += h * (0 - this.Pf) / Tf;
+          this.Qf += h * (0 - this.Qf) / Tf;
+          this.E = E0ph; this.mu = 1; this.lim = false;
+          this.th += 2 * Math.PI * p.f0 * h;
+          return;
+        }
         const xNew = idx.map(k => this.e(k) - vb[k]); // EMF at θ used in inject
         const iNew = idx.map(k => G * xNew[k] + this.ihf(k, be));
         let pI, qI, lA = 0, lB = 0, lC = 0;
@@ -1341,9 +1366,19 @@ function makeConverters(topo, dt) {
         this.x = xNew; this.i = iNew; this.cur = iNew[0];
         this.Pf += h * (pI - this.Pf) / Tf;
         this.Qf += h * (qI - this.Qf) / Tf;
+        // Optional scheduled dispatch step. Power flow and passive-history
+        // seeding always use P0/Q0; the EMT controller changes its reference
+        // only when simulation time reaches tSet. This is a controller input
+        // change, so it does not alter the network stamp or require an LU
+        // refactorization.
+        const stepped = +p.tSet >= 0 && t * 1000 >= +p.tSet;
+        const ramp = connectAt >= 0 && +p.Tramp > 0
+          ? Math.max(0, Math.min(1, (t - connectAt) / (+p.Tramp * 1e-3))) : 1;
+        const Pset = (stepped ? +p.P1 : +p.P0) * ramp;
+        const Qset = (stepped ? +p.Q1 : +p.Q0) * ramp;
         let w;
         if (+p.mode === 1) { // GFL dispatch (SPEC §2): PI toward P0/Q0, not away from it
-          const errP = p.P0 * 1000 - this.Pf, errQ = p.Q0 * 1000 - this.Qf;
+          const errP = Pset * 1000 - this.Pf, errQ = Qset * 1000 - this.Qf;
           if (!this.lim) { // anti-windup: freeze trims while actively limited (SPEC §2)
             this.integP += p.kiP * h * errP / 1000; // kiP/kiQ are Hz/(kW·s), V/(kvar·s) — errP/Q are in W/VAR
             this.integQ += p.kiQ * h * errQ / 1000;
@@ -1351,8 +1386,10 @@ function makeConverters(topo, dt) {
           w = 2 * Math.PI * (p.f0 + p.mp * errP / 1000 + this.integP);
           this.E = E0ph + p.mq * errQ / 1000 + this.integQ;
         } else { // GFM droop about the PF-consistent P0/E/Q0 (falls back to params when no pfInit)
-          w = 2 * Math.PI * (p.f0 - p.mp * (this.Pf / 1000 - P0e));
-          this.E = E0e - p.mq * (this.Qf / 1000 - Q0e);
+          const scheduled = stepped || connectAt >= 0;
+          const Pref = scheduled ? Pset : P0e, Qref = scheduled ? Qset : Q0e;
+          w = 2 * Math.PI * (p.f0 - p.mp * (this.Pf / 1000 - Pref));
+          this.E = E0e - p.mq * (this.Qf / 1000 - Qref);
         }
         this.th += w * h;
         // AC current limiter (SPEC §2): the forced-response current magnitude

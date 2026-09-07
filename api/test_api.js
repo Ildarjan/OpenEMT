@@ -1072,6 +1072,69 @@ function approxPct(sim, exp) { return Math.abs(sim - exp) / Math.abs(exp) * 100;
     badp.cases[0].err);
 }
 
+// A scheduled GFM dispatch change must use P0 before tSet and P1 afterwards.
+// This is checked through the public API and recorded branch power, so the
+// test covers parameter backfill, controller timing and query sign convention.
+{
+  const em = new OpenEMT();
+  em.loadCircuit({ webemt: 1, vconv: 'ph', blocks: [
+    { id: 1, type: 'src', x: 0, y: 0, rot: 0, params: { Vrms: 230, f: 50, Rs: 0.3 } },
+    { id: 2, type: 'gnd', x: 0, y: 0, rot: 0, params: {} },
+    { id: 3, type: 'gfm', x: 0, y: 0, rot: 0, params: {
+      mode: 1, E0: 230, f0: 50, mp: 0.05, mq: 0.4, P0: 1, Q0: 0,
+      tSet: 800, P1: 3, Q1: 0, kiP: 0.2, kiQ: 2,
+      Rf: 0.15, Lf: 3, Tf: 20, Idcmax: 25, Iacmax: 0,
+      pfType: 'PQ', Vset: 0, Qmax: 0, Qmin: 0
+    } },
+    { id: 4, type: 'gnd', x: 0, y: 0, rot: 0, params: {} },
+  ], wires: [
+    { a: [1, 0], b: [2, 0] }, { a: [1, 1], b: [3, 1] }, { a: [3, 0], b: [4, 0] },
+  ] });
+  const run = em.runSimulation({ nph: 1, Tms: 2000, dtUs: 50, plotUs: 500 });
+  const q = run.err ? null : em.query(3, 'P', { runId: run.runId });
+  const avg = (lo, hi) => {
+    const values = q.series[0].filter((_, i) => run.result.t[i] >= lo && run.result.t[i] <= hi);
+    return values.reduce((a, b) => a + b, 0) / values.length / 1000;
+  };
+  const before = q ? avg(600, 780) : NaN;
+  const after = q ? avg(1800, 1990) : NaN;
+  check('GFM scheduled setpoint changes from P0 to P1 at tSet',
+    !run.err && Math.abs(Math.abs(before) - 1) < 0.08 && Math.abs(Math.abs(after) - 3) < 0.08,
+    run.err || ('before=' + before + ' kW, after=' + after + ' kW'));
+}
+
+// A scheduled connection is an actual open branch before tConn, then closes
+// through the solver's segment-event refactor and ramps its dispatch. Checking
+// recorded power on both sides catches accidental pre-connection injection and
+// a missed topology rebuild.
+{
+  const em = new OpenEMT();
+  em.loadCircuit({ webemt: 1, vconv: 'ph', blocks: [
+    { id: 1, type: 'src', x: 0, y: 0, rot: 0, params: { Vrms: 230, f: 50, Rs: 0.3 } },
+    { id: 2, type: 'gnd', x: 0, y: 0, rot: 0, params: {} },
+    { id: 3, type: 'gfm', x: 0, y: 0, rot: 0, params: {
+      mode: 1, E0: 230, f0: 50, mp: 0.05, mq: 0.4, P0: 2, Q0: 0,
+      tSet: -1, P1: 2, Q1: 0, tConn: 600, Tramp: 100,
+      kiP: 0.2, kiQ: 2, Rf: 0.15, Lf: 3, Tf: 20,
+      Idcmax: 25, Iacmax: 0, pfType: 'PQ', Vset: 0, Qmax: 0, Qmin: 0
+    } },
+    { id: 4, type: 'gnd', x: 0, y: 0, rot: 0, params: {} },
+  ], wires: [
+    { a: [1, 0], b: [2, 0] }, { a: [1, 1], b: [3, 1] }, { a: [3, 0], b: [4, 0] },
+  ] });
+  const run = em.runSimulation({ nph: 1, Tms: 1600, dtUs: 50, plotUs: 500 });
+  const q = run.err ? null : em.query(3, 'P', { runId: run.runId });
+  const avg = (lo, hi) => {
+    const values = q.series[0].filter((_, i) => run.result.t[i] >= lo && run.result.t[i] <= hi);
+    return values.reduce((a, b) => a + b, 0) / values.length / 1000;
+  };
+  const before = q ? avg(300, 550) : NaN;
+  const after = q ? avg(1400, 1590) : NaN;
+  check('GFM tConn keeps the branch open and then reaches its ramped dispatch',
+    !run.err && Math.abs(before) < 1e-9 && Math.abs(Math.abs(after) - 2) < 0.1,
+    run.err || ('before=' + before + ' kW, after=' + after + ' kW'));
+}
+
 (async () => {
   if (global.__mcpCheck) await global.__mcpCheck();
   if (failures) { console.error('\n' + failures + ' API test(s) FAILED'); process.exit(1); }

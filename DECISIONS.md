@@ -3919,3 +3919,10 @@ layers of escaping as `MI:s*{...}`, matched nothing, reported null for both
 tables and passed: a guard that could never fail, which is the third time this
 pattern has appeared in this project. It is now regex-free. Break every guard
 before believing it, and prefer a parser that cannot silently match nothing.
+## 2026-09-07: GFM setpoint steps are explicit controller inputs
+
+The GFM block may change from `P0/Q0` to `P1/Q1` once at `tSet` during an EMT run. Power flow and history seeding continue to use `P0/Q0`; the timed change affects only the controller reference and therefore needs no conductance-matrix refactorization.
+
+## 2026-09-07: Scheduled GFM connection is an open branch with a dispatch ramp
+
+Before `tConn`, the GFM contributes neither conductance nor current and its PI states are frozen while its oscillator free-runs at `f0`. At connection the normal branch stamp is enabled through the existing segment-event refactorization, and `P/Q` dispatch ramps over `Tramp`; this separates a control-interaction study from artificial pre-connection integrator windup.
